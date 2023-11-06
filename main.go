@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -9,7 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+type HeadResult struct {
+	URL        string
+	StatusCode int
+}
 
 func parseArgs() (string, error) {
 	flag.Parse()
@@ -25,9 +32,12 @@ func parseArgs() (string, error) {
 		return "", fmt.Errorf("invalid filename %s: %s", filename, err)
 	}
 
-	_, err = os.Stat(path)
+	fileinfo, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("file %s does not exist: %s", path, err)
+	}
+	if fileinfo.IsDir() {
+		return "", fmt.Errorf("given path %s is a directory", path)
 	}
 
 	return path, nil
@@ -48,10 +58,19 @@ func parseURLFile(fileHandler *os.File) ([]string, error) {
 	return lines, nil
 }
 
-func searchWithHead(url string, wg *sync.WaitGroup) {
+func searchWithHead(url string, wg *sync.WaitGroup, results chan<- HeadResult) {
 	defer wg.Done()
 
-	resp, err := http.Head(url)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		log.Printf("Error creating request: %s\n", err)
+		return
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("Error: %s\n", err)
 		return
@@ -59,7 +78,10 @@ func searchWithHead(url string, wg *sync.WaitGroup) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("`%s` was not found: status %d\n", url, resp.StatusCode)
+		results <- HeadResult{
+			URL:        url,
+			StatusCode: resp.StatusCode,
+		}
 	}
 }
 
@@ -75,17 +97,22 @@ func main() {
 	}
 	defer file.Close()
 
-	var wg sync.WaitGroup
 	urls, err := parseURLFile(file)
 	if err != nil {
 		log.Fatal("Error parsing URL file:", err)
 	}
 
+	var wg sync.WaitGroup
 	wg.Add(len(urls))
+	results := make(chan HeadResult, len(urls))
 
 	for _, u := range urls {
-		go searchWithHead(u, &wg)
+		go searchWithHead(u, &wg, results)
 	}
-
 	wg.Wait()
+	close(results)
+
+	for r := range results {
+		fmt.Printf("Status '%d': %s\n", r.StatusCode, r.URL)
+	}
 }
