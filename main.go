@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -85,6 +86,12 @@ func searchWithHead(url string, wg *sync.WaitGroup, results chan<- HeadResult) {
 	}
 }
 
+func worker(data <-chan string, results chan HeadResult, wg *sync.WaitGroup) {
+	for url := range data {
+		searchWithHead(url, wg, results)
+	}
+}
+
 func main() {
 	path, err := parseArgs()
 	if err != nil {
@@ -104,11 +111,22 @@ func main() {
 
 	var wg sync.WaitGroup
 	wg.Add(len(urls))
+	numWorkers := runtime.NumCPU() * 2
 	results := make(chan HeadResult, len(urls))
+	url := make(chan string, len(urls))
 
-	for _, u := range urls {
-		go searchWithHead(u, &wg, results)
+	// Setup workers
+	for i := 0; i < numWorkers; i++ {
+		go worker(url, results, &wg)
 	}
+
+	// Send urls to them
+	for _, u := range urls {
+		url <- u
+	}
+	close(url)
+
+	// When all urls are checked, it is safe to close.
 	wg.Wait()
 	close(results)
 
