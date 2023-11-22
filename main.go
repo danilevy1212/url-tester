@@ -2,109 +2,101 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"flag"
 	"fmt"
+	"github.com/alecthomas/kingpin/v2"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"time"
+	urllib "net/url"
+	"url-tester/lib/url"
+	"url-tester/lib/worker"
 )
 
-type HeadResult struct {
-	URL        string
-	StatusCode int
-}
+var (
+	app  = kingpin.New("url-tester", "Reports not available URLs by sending HEAD requests to them.")
+	file = app.Flag("file", "Test all urls contained in a file, separated by a new line").Short('f').String()
+	link = app.Arg("url", "URL to send a HEAD request to").String()
+)
 
-func parseArgs() (string, error) {
-	flag.Parse()
+// Must be called after parsing arguments
+func getUrls() ([]string, error) {
+	var urls []string
 
-	filename := flag.Arg(0)
-
-	if filename == "" {
-		return "", fmt.Errorf("no filepath specified")
+	if *file == "" && *link == "" {
+		app.Fatalf("No urls passed, see --help")
 	}
 
-	path, err := filepath.Abs(filename)
+	if *link != "" {
+		argURL, err := url.SanitizeURL(*link)
+		if err != nil {
+			urls = append(urls, argURL)
+		} else {
+			return nil, fmt.Errorf("invalid url %s: %s", *link, err)
+		}
+	}
+
+	if *file == "" {
+		return urls, nil
+	}
+
+	path, err := filepath.Abs(*file)
 	if err != nil {
-		return "", fmt.Errorf("invalid filename %s: %s", filename, err)
+		return nil, fmt.Errorf("invalid filename %s: %s", *file, err)
 	}
 
 	fileinfo, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("file %s does not exist: %s", path, err)
+		return nil, fmt.Errorf("file %s does not exist: %s", path, err)
 	}
 	if fileinfo.IsDir() {
-		return "", fmt.Errorf("given path %s is a directory", path)
+		return nil, fmt.Errorf("given path %s is a directory", path)
 	}
 
-	return path, nil
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("error opening file: %s", err)
+	}
+	defer file.Close()
+
+	urls, err = parseURLFile(file, urls)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing provided file: %s", err)
+	}
+
+	return urls, nil
 }
 
-func parseURLFile(fileHandler *os.File) ([]string, error) {
-	var lines []string
+func parseURLFile(fileHandler *os.File, result []string) ([]string, error) {
 	scanner := bufio.NewScanner(fileHandler)
+	originalWriter := log.Writer()
+	defer log.SetOutput(originalWriter)
+
+	log.SetOutput(os.Stderr)
 
 	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
+		rawURL := scanner.Text()
+		url, err := url.SanitizeURL(rawURL)
+
+		if err == nil {
+			result = append(result, url)
+		} else {
+			log.Printf("WARNING: error ocurred during parsing of url `%s`, ignoring: %s", rawURL, err)
+		}
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("error reading file: %s", err)
 	}
 
-	return lines, nil
-}
-
-func searchWithHead(url string, wg *sync.WaitGroup, results chan<- HeadResult) {
-	defer wg.Done()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
-	if err != nil {
-		log.Printf("Error creating request: %s\n", err)
-		return
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("Error: %s\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		results <- HeadResult{
-			URL:        url,
-			StatusCode: resp.StatusCode,
-		}
-	}
-}
-
-func worker(data <-chan string, results chan HeadResult, wg *sync.WaitGroup) {
-	for url := range data {
-		searchWithHead(url, wg, results)
-	}
+	return result, nil
 }
 
 func main() {
-	path, err := parseArgs()
-	if err != nil {
-		log.Fatal("Error:", err)
-	}
+	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	file, err := os.Open(path)
-	if err != nil {
-		log.Fatal("Error opening file:", err)
-	}
-	defer file.Close()
-
-	urls, err := parseURLFile(file)
+	urls, err := getUrls()
 	if err != nil {
 		log.Fatal("Error parsing URL file:", err)
 	}
@@ -112,12 +104,12 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(len(urls))
 	numWorkers := runtime.NumCPU() * 2
-	results := make(chan HeadResult, len(urls))
+	results := make(chan worker.HeadResult, len(urls))
 	url := make(chan string, len(urls))
 
 	// Setup workers
 	for i := 0; i < numWorkers; i++ {
-		go worker(url, results, &wg)
+		go worker.Worker(url, results, &wg)
 	}
 
 	// Send urls to them
@@ -131,6 +123,8 @@ func main() {
 	close(results)
 
 	for r := range results {
-		fmt.Printf("Status '%d': %s\n", r.StatusCode, r.URL)
+		u, _ := urllib.QueryUnescape(r.URL)
+
+		fmt.Printf("Status '%d': '%s'\n", r.StatusCode, u)
 	}
 }
