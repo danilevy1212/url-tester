@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"github.com/alecthomas/kingpin/v2"
 	"log"
+	urllib "net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	urllib "net/url"
 	"url-tester/lib/url"
 	"url-tester/lib/worker"
 )

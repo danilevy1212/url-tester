@@ -2,10 +2,10 @@ package worker
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"sync"
 	"time"
-	"log"
 )
 
 type HeadResult struct {
